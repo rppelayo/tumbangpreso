@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tumbang Preso — Top‑Down + Sprites (Player/Bantay/Slipper/Can)</title>
+  <style>
+    html, body { height: 100%; margin: 0; background:#0e0f12; }
+    #game { width: 100%; height: 100%; }
+    .hint { position: fixed; left: 12px; bottom: 12px; color:#cfd3dc; font: 14px/1.3 system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, sans-serif; opacity:.9 }
+    .hint kbd { background:#1f2330; border:1px solid #2b3040; padding:2px 6px; border-radius:6px; font-family:inherit; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.0/dist/phaser.min.js"></script>
+</head>
+<body>
+  <div id="game"></div>
+  <div class="hint">
+    Sprites enabled • Stay behind the perimeter line to aim/throw. Hit the can, pick up the tsinelas, return behind the line. Crossing the line after throwing makes <em>bantay</em> chase. <kbd>R</kbd> restart
+  </div>
+  <script>
+  (function(){
+    const config = {
+      type: Phaser.AUTO,
+      parent: 'game',
+      backgroundColor: '#0e0f12',
+      scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH, width: 960, height: 540 },
+      physics: { default: 'arcade', arcade: { gravity: { y: 0 }, debug: false } },
+      render: { pixelArt: true, roundPixels: true },
+      scene: { preload, create, update }
+    };
+
+    new Phaser.Game(config);
+
+    // --- Game State ---
+    const STATE = { AIM:'aim', RETRIEVE:'retrieve', WON:'won', LOST:'lost' };
+    let state = STATE.AIM;
+
+    // Entities
+    let stump, can, player, slipper, bantay, perimeterY;
+
+    // UI
+    let statusText, infoText, aimLine, startPoint;
+
+    // Input
+    let cursors, wasd, pointerVec = new Phaser.Math.Vector2();
+
+    // Flags
+    let hasThrown = false, playerCrossed = false, bantayChase = false;
+    let canOnStump = true, canDynamic = false, pickedUp = false;
+
+    // Patrol
+    let patrolLeftX, patrolRightX, patrolDir = -1;
+
+    // Tunables
+    const powerCap = 3200;          // max throw strength
+    const launchMul = 1.6;          // throw multiplier
+    const playerSpeed = 320;        // horizontal (increased from 260)
+    const playerUpSpeed = 280;      // vertical during RETRIEVE (increased from 220)
+    const bantayPatrolSpeed = 60;   // idle patrol (decreased from 90)
+    const bantayChaseSpeed = 140;   // chase speed (decreased from 180)
+
+    // --- Preload external PNGs ---
+    function preload(){
+      // Player 4 frames
+      this.load.image('player1', 'resources/player-f1.png');
+      this.load.image('player2', 'resources/player-f2.png');
+      this.load.image('player3', 'resources/player-f3.png');
+      this.load.image('player4', 'resources/player-f4.png');
+
+      // Bantay 4 frames
+      this.load.image('bantay1', 'resources/bantay-1.png');
+      this.load.image('bantay2', 'resources/bantay-2.png');
+      this.load.image('bantay3', 'resources/bantay-3.png');
+      this.load.image('bantay4', 'resources/bantay-4.png');
+
+      // Slipper & can
+      this.load.image('slipper', 'resources/tsinelas.png');
+      this.load.image('can', 'resources/lata.png');
+
+      // Stump is generated (simple pixel block) — replace with sprite later if you want
+      const g = this.make.graphics({ add:false });
+      g.fillStyle(0x6b4f2a, 1); g.fillRoundedRect(0, 0, 64, 24, 6);
+      g.lineStyle(2, 0x533f23, 1); g.strokeRoundedRect(0, 0, 64, 24, 6);
+      g.generateTexture('stump', 64, 24);
+    }
+
+    function create(){
+      const { width, height } = this.scale.gameSize;
+
+      // Animations from multiple images
+      this.anims.create({
+        key: 'player-run', frameRate: 8, repeat: -1,
+        frames: [ {key:'player1'}, {key:'player2'}, {key:'player3'}, {key:'player4'} ]
+      });
+      this.anims.create({
+        key: 'bantay-run', frameRate: 8, repeat: -1,
+        frames: [ {key:'bantay1'}, {key:'bantay2'}, {key:'bantay3'}, {key:'bantay4'} ]
+      });
+
+      perimeterY = height * 0.6; // safety line
+
+      // Stump + can at top (can starts STATIC so it won't move until hit)
+      const stumpX = width * 0.5, stumpY = height * 0.18;
+      stump = this.physics.add.staticImage(stumpX, stumpY, 'stump');
+      can = this.physics.add.staticImage(stumpX, stumpY - 50, 'can');
+      can.setScale(1.11); // Scale sprite to 50% of original size (45% * 1.11 ≈ 50%)
+
+      // Bantay patrols above the line — no gravity in top-down
+      patrolLeftX = stumpX - Math.min(220, width*0.35);
+      patrolRightX = stumpX + Math.min(220, width*0.35);
+      bantay = this.physics.add.sprite(stumpX, perimeterY - 28, 'bantay1');
+      bantay.setImmovable(true);
+      bantay.body.setAllowGravity(false);
+      bantay.setScale(1.11); // Scale sprite to 50% of original size (45% * 1.11 ≈ 50%)
+      bantay.play('bantay-run');
+
+      // Player (top-down) — no gravity
+      player = this.physics.add.sprite(width*0.5, height - 64, 'player1');
+      player.setCollideWorldBounds(true);
+      player.body.setAllowGravity(false);
+      player.setScale(1.11); // Scale sprite to 50% of original size (45% * 1.11 ≈ 50%)
+
+      // Tsinelas (projectile)
+      slipper = this.physics.add.image(player.x + 10, player.y - 20, 'slipper');
+      slipper.setBounce(0.4).setCollideWorldBounds(true).setDrag(160,160);
+      slipper.body.setAllowGravity(false);
+      slipper.setScale(1.11); // Scale sprite to 50% of original size (45% * 1.11 ≈ 50%)
+
+      // Overlaps / collisions
+      this.physics.add.overlap(slipper, can, onHitCan, null, this); // while can is static, overlap is enough
+      this.physics.add.overlap(player, slipper, tryPickup, null, this);
+      this.physics.add.overlap(player, bantay, maybeTag, null, this);
+      
+      // Add collision between slipper and can for realistic bouncing
+      this.physics.add.collider(slipper, can, onSlipperCanCollision, null, this);
+      
+      // Add slight padding to collision detection for better gameplay with scaled sprites
+      player.body.setSize(player.width * 1.1, player.height * 1.1);
+      bantay.body.setSize(bantay.width * 1.1, bantay.height * 1.1);
+
+      // UI
+      statusText = this.add.text(16, 16, '', f18('#e7e9ee'));
+      infoText = this.add.text(16, 40, '', f14('#9aa3b2'));
+      aimLine = this.add.graphics();
+
+      // Perimeter line
+      const line = this.add.graphics();
+      line.lineStyle(2, 0x334155, 1).strokeLineShape(new Phaser.Geom.Line(0, perimeterY, width, perimeterY));
+      this.add.text(16, perimeterY - 18, '— perimeter —', f14('#64748b'));
+
+      // Input
+      this.input.on('pointerdown', p => {
+        pointerVec.set(p.x, p.y);
+        if (state !== STATE.AIM) return;
+        startPoint = new Phaser.Math.Vector2(p.x, p.y);
+      });
+      this.input.on('pointermove', p => {
+        pointerVec.set(p.x, p.y);
+        if (state !== STATE.AIM || !startPoint) return;
+        drawAim(this, startPoint, new Phaser.Math.Vector2(p.x, p.y));
+      });
+      this.input.on('pointerup', p => {
+        pointerVec.set(p.x, p.y);
+        if (state !== STATE.AIM || !startPoint) return;
+        launch(startPoint, new Phaser.Math.Vector2(p.x, p.y));
+        startPoint = null; aimLine.clear();
+      });
+
+      cursors = this.input.keyboard.createCursorKeys();
+      wasd = this.input.keyboard.addKeys({
+        up: Phaser.Input.Keyboard.KeyCodes.W,
+        down: Phaser.Input.Keyboard.KeyCodes.S,
+        left: Phaser.Input.Keyboard.KeyCodes.A,
+        right: Phaser.Input.Keyboard.KeyCodes.D
+      });
+      this.input.keyboard.on('keydown-R', ()=> this.scene.restart());
+
+      updateTexts();
+    }
+
+    function update(_, delta){
+      const dt = delta/1000;
+      if (state === STATE.WON || state === STATE.LOST) return;
+
+      // Bantay: patrol or chase
+      if (!bantayChase) {
+        bantay.x += patrolDir * bantayPatrolSpeed * dt;
+        if (bantay.x < patrolLeftX) { bantay.x = patrolLeftX; patrolDir = 1; }
+        if (bantay.x > patrolRightX) { bantay.x = patrolRightX; patrolDir = -1; }
+        // Play running animation during patrol
+        bantay.anims.play('bantay-run', true);
+      } else {
+        const dirX = Math.sign(player.x - bantay.x);
+        bantay.x += dirX * bantayChaseSpeed * dt;
+        const dirY = Math.sign(player.y - bantay.y);
+        bantay.y += dirY * 120 * dt; // Reduced vertical chase speed for better balance
+        // Play running animation during chase
+        bantay.anims.play('bantay-run', true);
+      }
+
+      // Player movement
+      let vx = 0, vy = 0;
+      if (cursors.left.isDown || wasd.left.isDown) vx -= 1;
+      if (cursors.right.isDown || wasd.right.isDown) vx += 1;
+      if (state === STATE.RETRIEVE) {
+        if (cursors.up.isDown || wasd.up.isDown) vy -= 1;
+        if (cursors.down.isDown || wasd.down.isDown) vy += 1;
+      }
+      if (this.input.activePointer.isDown) {
+        const dx = pointerVec.x - player.x;
+        const dy = pointerVec.y - player.y;
+        if (Math.abs(dx) > 24) vx += Math.sign(dx) * 0.7;
+        if (state === STATE.RETRIEVE && Math.abs(dy) > 24) vy += Math.sign(dy) * 0.7;
+      }
+      player.setVelocityX(vx * playerSpeed);
+      player.setVelocityY(vy * playerUpSpeed);
+
+      // Play/stop run anim based on movement
+      if (vx !== 0 || vy !== 0) player.anims.play('player-run', true); 
+      else { player.anims.stop(); player.setTexture('player1'); }
+
+      // Keep player behind line in AIM state
+      if (state === STATE.AIM && player.y < perimeterY + 8) player.y = perimeterY + 8;
+
+      // After throw, crossing triggers chase (visual pressure)
+      if (state === STATE.RETRIEVE && hasThrown) {
+        playerCrossed = player.y < perimeterY - 6;
+        if (playerCrossed) bantayChase = true;
+      }
+
+      // Auto-win when picked up & safely behind line while being chased
+      if (state === STATE.RETRIEVE && pickedUp && bantayChase && player.y >= perimeterY + 8) {
+        state = STATE.WON; updateTexts();
+      }
+
+      // Bantay animation is now handled in the movement section above
+
+      // Stop spinning when objects slow down
+      if (slipper.body && slipper.body.velocity.length() < 50) {
+        slipper.setAngularVelocity(0);
+      }
+      if (canDynamic && can.body && can.body.velocity.length() < 30) {
+        can.setAngularVelocity(0);
+      }
+    }
+
+    // --- Mechanics ---
+    function onHitCan(){
+      // First impact should DISPLACE the can. If it's still static and we're in AIM, swap to dynamic and push it
+      if (!canDynamic && state === STATE.AIM) {
+        const scene = this;
+        const pos = { x: can.x, y: can.y };
+        const sv = slipper.body
+          ? new Phaser.Math.Vector2(slipper.body.velocity.x, slipper.body.velocity.y)
+          : new Phaser.Math.Vector2(0,0);
+        can.destroy();
+        can = scene.physics.add.image(pos.x, pos.y, 'can')
+          .setBounce(0.3) // Add some bounce for more realistic physics
+          .setCollideWorldBounds(true)
+          .setDrag(120,120); // Reduced drag for more dynamic movement
+        can.body.setAllowGravity(false);
+        can.setScale(1.11); // Scale sprite to 50% of original size (45% * 1.11 ≈ 50%)
+        can.setAngularVelocity(180); // Add spinning when hit
+        can.setVelocity(sv.x * 0.8, sv.y * 0.8); // Transfer some momentum from slipper
+        canDynamic = true;
+        canOnStump = false;
+        state = STATE.RETRIEVE;
+        updateTexts();
+      }
+    }
+
+    function tryPickup(){
+      if (state !== STATE.RETRIEVE || pickedUp) return;
+      pickedUp = true;
+      slipper.setVisible(false);
+      slipper.body.enable = false;
+      slipper.setAngularVelocity(0); // Stop spinning when picked up
+      if (!bantayChase) {
+        state = STATE.WON; updateTexts(); return;
+      }
+      if (player.y >= perimeterY + 8) { state = STATE.WON; updateTexts(); }
+    }
+
+    function maybeTag(){
+      // Bantay can tag the player when chasing during retrieve phase
+      if (bantayChase && state === STATE.RETRIEVE) {
+        state = STATE.LOST; updateTexts();
+      }
+    }
+
+    function onSlipperCanCollision(slipper, can){
+      // Realistic collision between slipper and can
+      if (canDynamic) {
+        // Calculate collision angle and apply realistic bounce
+        const dx = slipper.x - can.x;
+        const dy = slipper.y - can.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        if (distance > 0) {
+          // Normalize direction vector
+          const nx = dx / distance;
+          const ny = dy / distance;
+          
+          // Apply bounce in the direction away from the can
+          const bounceForce = 200;
+          slipper.setVelocity(nx * bounceForce, ny * bounceForce);
+        }
+      }
+    }
+
+    function launch(start, end){
+      const v = new Phaser.Math.Vector2(start.x - end.x, start.y - end.y).limit(powerCap);
+      slipper.setVelocity(v.x * launchMul, -v.y * launchMul); // invert Y so up-drag = up throw
+      slipper.setAngularVelocity(360); // Add spinning animation to tsinelas
+      hasThrown = true;
+    }
+
+    // --- Helpers ---
+    function drawAim(scene, start, cur){
+      const dir = new Phaser.Math.Vector2(start.x - cur.x, start.y - cur.y);
+      const len = Math.min(dir.length(), 360); dir.setLength(len);
+      const end = new Phaser.Math.Vector2(slipper.x, slipper.y).add(dir);
+      aimLine.clear();
+      aimLine.lineStyle(3, 0x9ad1ff, 1);
+      aimLine.strokeLineShape(new Phaser.Geom.Line(slipper.x, slipper.y, end.x, end.y));
+      aimLine.fillStyle(0x9ad1ff, 1); aimLine.fillCircle(end.x, end.y, 4);
+    }
+
+    function updateTexts(){
+      if (state === STATE.WON) {
+        statusText.setText('✅ Panalo! Nakuha mo ang tsinelas at nakabalik sa ligtas.');
+        infoText.setText('Press R to play again');
+        return;
+      }
+      if (state === STATE.LOST) {
+        statusText.setText('🛑 Tagged!');
+        infoText.setText('Press R to retry');
+        return;
+      }
+      if (state === STATE.AIM) {
+        statusText.setText('🎯 Step 1: Tumbahin ang lata (stay behind the line)');
+        infoText.setText('Drag to aim, release to throw.');
+        return;
+      }
+      if (state === STATE.RETRIEVE) {
+        statusText.setText('🏃 Step 2: Kunin ang tsinelas. Babantayan ka pag lumampas sa linya.');
+        infoText.setText('WASD/Arrows or drag. Return behind the line to be safe.');
+        return;
+      }
+    }
+
+    function f18(color){ return { fontFamily:'system-ui, sans-serif', fontSize:'18px', color: color }; }
+    function f14(color){ return { fontFamily:'system-ui, sans-serif', fontSize:'14px', color: color }; }
+  })();
+  </script>
+</body>
+</html>
