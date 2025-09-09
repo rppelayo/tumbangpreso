@@ -15,7 +15,7 @@
 <body>
   <div id="game"></div>
   <div class="hint">
-    Sprites enabled • Stay behind the perimeter line to aim/throw. Hit the can, pick up the tsinelas, return behind the line. Crossing the line after throwing makes <em>bantay</em> chase. <kbd>R</kbd> restart
+    Sprites enabled • <kbd>WASD</kbd> or <kbd>Arrows</kbd> to move player. <kbd>SPACE</kbd> to start aiming, <kbd>Arrows</kbd> to aim, <kbd>SPACE</kbd> to launch, <kbd>ESC</kbd> to cancel. <kbd>R</kbd> restart
   </div>
   <script>
   (function(){
@@ -47,6 +47,16 @@
     // Flags
     let hasThrown = false, playerCrossed = false, bantayChase = false;
     let canOnStump = true, canDynamic = false, pickedUp = false;
+    let slipperHeld = true; // Track if slipper is being held by player
+    let launchTime = 0; // Track when slipper was launched
+    
+    // Launch system
+    let isAiming = false; // True when in aiming mode
+    let launchPower = 0; // Current launch power (0-100)
+    let launchDirection = 0; // Launch direction in degrees (0 = up, 90 = right, etc.)
+    let powerBar, directionIndicator;
+    let powerDirection = 1; // 1 for increasing, -1 for decreasing
+    let powerSpeed = 80; // Speed of power bar movement
 
     // Patrol
     let patrolLeftX, patrolRightX, patrolDir = -1;
@@ -120,11 +130,13 @@
       player.body.setAllowGravity(false);
       player.setScale(1.11); // Scale sprite to 50% of original size (45% * 1.11 ≈ 50%)
 
-      // Tsinelas (projectile)
+      // Tsinelas (projectile) - starts with player
       slipper = this.physics.add.image(player.x + 10, player.y - 20, 'slipper');
       slipper.setBounce(0.4).setCollideWorldBounds(true).setDrag(160,160);
       slipper.body.setAllowGravity(false);
       slipper.setScale(1.11); // Scale sprite to 50% of original size (45% * 1.11 ≈ 50%)
+      slipper.setVisible(true); // Make sure it's visible
+      slipper.body.enable = false; // Disable physics initially (held by player)
 
       // Overlaps / collisions
       this.physics.add.overlap(slipper, can, onHitCan, null, this); // while can is static, overlap is enough
@@ -148,23 +160,7 @@
       line.lineStyle(2, 0x334155, 1).strokeLineShape(new Phaser.Geom.Line(0, perimeterY, width, perimeterY));
       this.add.text(16, perimeterY - 18, '— perimeter —', f14('#64748b'));
 
-      // Input
-      this.input.on('pointerdown', p => {
-        pointerVec.set(p.x, p.y);
-        if (state !== STATE.AIM) return;
-        startPoint = new Phaser.Math.Vector2(p.x, p.y);
-      });
-      this.input.on('pointermove', p => {
-        pointerVec.set(p.x, p.y);
-        if (state !== STATE.AIM || !startPoint) return;
-        drawAim(this, startPoint, new Phaser.Math.Vector2(p.x, p.y));
-      });
-      this.input.on('pointerup', p => {
-        pointerVec.set(p.x, p.y);
-        if (state !== STATE.AIM || !startPoint) return;
-        launch(startPoint, new Phaser.Math.Vector2(p.x, p.y));
-        startPoint = null; aimLine.clear();
-      });
+      // Input (mouse system removed - using keyboard launch system)
 
       cursors = this.input.keyboard.createCursorKeys();
       wasd = this.input.keyboard.addKeys({
@@ -174,6 +170,21 @@
         right: Phaser.Input.Keyboard.KeyCodes.D
       });
       this.input.keyboard.on('keydown-R', ()=> this.scene.restart());
+      
+      // Launch system controls
+      this.input.keyboard.on('keydown-SPACE', () => {
+        if (state === STATE.AIM && slipperHeld && !isAiming) {
+          startAiming(this);
+        } else if (isAiming) {
+          launchSlipper(this);
+        }
+      });
+      
+      this.input.keyboard.on('keydown-ESC', () => {
+        if (isAiming) {
+          cancelAiming();
+        }
+      });
 
       updateTexts();
     }
@@ -198,19 +209,34 @@
         bantay.anims.play('bantay-run', true);
       }
 
-      // Player movement
+      // Player movement (keyboard only) - disabled when aiming
       let vx = 0, vy = 0;
-      if (cursors.left.isDown || wasd.left.isDown) vx -= 1;
-      if (cursors.right.isDown || wasd.right.isDown) vx += 1;
-      if (state === STATE.RETRIEVE) {
-        if (cursors.up.isDown || wasd.up.isDown) vy -= 1;
-        if (cursors.down.isDown || wasd.down.isDown) vy += 1;
-      }
-      if (this.input.activePointer.isDown) {
-        const dx = pointerVec.x - player.x;
-        const dy = pointerVec.y - player.y;
-        if (Math.abs(dx) > 24) vx += Math.sign(dx) * 0.7;
-        if (state === STATE.RETRIEVE && Math.abs(dy) > 24) vy += Math.sign(dy) * 0.7;
+      if (!isAiming) {
+        if (cursors.left.isDown || wasd.left.isDown) vx -= 1;
+        if (cursors.right.isDown || wasd.right.isDown) vx += 1;
+        if (state === STATE.RETRIEVE) {
+          if (cursors.up.isDown || wasd.up.isDown) vy -= 1;
+          if (cursors.down.isDown || wasd.down.isDown) vy += 1;
+        }
+      } else {
+        // When aiming, arrow keys control direction (5-degree increments, 0-180 degrees for horizontal aiming)
+        if (cursors.left.isDown && launchDirection > 0) {
+          launchDirection = Math.max(0, launchDirection - 5);
+        }
+        if (cursors.right.isDown && launchDirection < 180) {
+          launchDirection = Math.min(180, launchDirection + 5);
+        }
+        
+        // Update power bar (bouncing)
+        launchPower += powerDirection * powerSpeed * dt;
+        if (launchPower >= 100) {
+          launchPower = 100;
+          powerDirection = -1; // Start decreasing
+        } else if (launchPower <= 0) {
+          launchPower = 0;
+          powerDirection = 1; // Start increasing
+        }
+        updatePowerBar();
       }
       player.setVelocityX(vx * playerSpeed);
       player.setVelocityY(vy * playerUpSpeed);
@@ -219,6 +245,12 @@
       if (vx !== 0 || vy !== 0) player.anims.play('player-run', true); 
       else { player.anims.stop(); player.setTexture('player1'); }
 
+      // Make tsinelas follow player when held (before thrown)
+      if (slipperHeld && !hasThrown && state === STATE.AIM) {
+        slipper.x = player.x + 10;
+        slipper.y = player.y - 20;
+      }
+
       // Keep player behind line in AIM state
       if (state === STATE.AIM && player.y < perimeterY + 8) player.y = perimeterY + 8;
 
@@ -226,6 +258,8 @@
       if (state === STATE.RETRIEVE && hasThrown) {
         playerCrossed = player.y < perimeterY - 6;
         if (playerCrossed) bantayChase = true;
+        // Ensure aim line is cleared when in retrieve state
+        aimLine.clear();
       }
 
       // Auto-win when picked up & safely behind line while being chased
@@ -264,17 +298,25 @@
         can.setVelocity(sv.x * 0.8, sv.y * 0.8); // Transfer some momentum from slipper
         canDynamic = true;
         canOnStump = false;
-        state = STATE.RETRIEVE;
-        updateTexts();
+        // State already changed to RETRIEVE in launch function
       }
     }
 
     function tryPickup(){
       if (state !== STATE.RETRIEVE || pickedUp) return;
+      
+      // Prevent immediate pickup after launch (wait at least 500ms)
+      if (this.time.now - launchTime < 500) return;
+      
+      // Also check distance - slipper must be at least 50 pixels away from player
+      const distance = Phaser.Math.Distance.Between(player.x, player.y, slipper.x, slipper.y);
+      if (distance < 50) return;
+      
       pickedUp = true;
       slipper.setVisible(false);
       slipper.body.enable = false;
       slipper.setAngularVelocity(0); // Stop spinning when picked up
+      slipperHeld = true; // Slipper is held again
       if (!bantayChase) {
         state = STATE.WON; updateTexts(); return;
       }
@@ -309,10 +351,141 @@
     }
 
     function launch(start, end){
+      // Enable slipper physics when launching
+      slipper.body.enable = true;
+      slipperHeld = false; // Slipper is no longer held
+      slipper.setVisible(true); // Make sure slipper is visible when thrown
+      
+      // Launch from player's current position
+      slipper.x = player.x + 10;
+      slipper.y = player.y - 20;
+      
       const v = new Phaser.Math.Vector2(start.x - end.x, start.y - end.y).limit(powerCap);
       slipper.setVelocity(v.x * launchMul, -v.y * launchMul); // invert Y so up-drag = up throw
       slipper.setAngularVelocity(360); // Add spinning animation to tsinelas
       hasThrown = true;
+      launchTime = this.time.now; // Record launch time
+      
+      // Clear the aim trajectory line
+      aimLine.clear();
+      
+      // Allow player to retrieve slipper regardless of can hit
+      state = STATE.RETRIEVE;
+      updateTexts();
+    }
+
+    // --- Launch System Functions ---
+    function startAiming(scene){
+      isAiming = true;
+      launchPower = 0;
+      launchDirection = 0; // Default to right (0 degrees = 3 o'clock)
+      powerDirection = 1; // Start increasing
+      
+      // Create power bar
+      powerBar = scene.add.graphics();
+      directionIndicator = scene.add.graphics();
+      
+      updatePowerBar();
+      updateTexts();
+    }
+    
+    function updatePowerBar(){
+      if (!powerBar) return;
+      
+      const barWidth = 200;
+      const barHeight = 20;
+      const barX = 16;
+      const barY = 80;
+      
+      // Clear previous bar
+      powerBar.clear();
+      
+      // Background
+      powerBar.fillStyle(0x333333, 0.8);
+      powerBar.fillRect(barX, barY, barWidth, barHeight);
+      
+      // Power fill
+      const powerWidth = (launchPower / 100) * barWidth;
+      powerBar.fillStyle(0x00ff00, 0.8);
+      powerBar.fillRect(barX, barY, powerWidth, barHeight);
+      
+      // Border
+      powerBar.lineStyle(2, 0xffffff, 1);
+      powerBar.strokeRect(barX, barY, barWidth, barHeight);
+      
+      // Update direction indicator
+      updateDirectionIndicator();
+    }
+    
+    function updateDirectionIndicator(){
+      if (!directionIndicator) return;
+      
+      directionIndicator.clear();
+      
+      // Draw arrow from slipper position
+      const arrowLength = 50;
+      // Convert angle: 0° = right (3 o'clock), 90° = up (12 o'clock), 180° = left (9 o'clock)
+      // Map 0-180 to 0-270-180 in Phaser coordinates
+      const phaserAngle = launchDirection <= 90 ? launchDirection * 3 : 270 - (launchDirection - 90);
+      const radians = Phaser.Math.DegToRad(phaserAngle);
+      const endX = slipper.x + Math.cos(radians) * arrowLength;
+      const endY = slipper.y + Math.sin(radians) * arrowLength;
+      
+      directionIndicator.lineStyle(4, 0xff0000, 1);
+      directionIndicator.strokeLineShape(new Phaser.Geom.Line(slipper.x, slipper.y, endX, endY));
+      
+      // Arrow head
+      directionIndicator.fillStyle(0xff0000, 1);
+      directionIndicator.fillCircle(endX, endY, 6);
+    }
+    
+    function launchSlipper(scene){
+      if (!isAiming) return;
+      
+      // Enable slipper physics when launching
+      slipper.body.enable = true;
+      slipperHeld = false;
+      slipper.setVisible(true);
+      
+      // Calculate velocity from power and direction
+      // Convert angle: 0° = right (3 o'clock), 90° = up (12 o'clock), 180° = left (9 o'clock)
+      // Map 0-180 to 0-270-180 in Phaser coordinates
+      const phaserAngle = launchDirection <= 90 ? launchDirection * 3 : 270 - (launchDirection - 90);
+      const radians = Phaser.Math.DegToRad(phaserAngle);
+      const velocity = (launchPower / 100) * 800; // Increased max velocity to 800
+      
+      slipper.setVelocity(
+        Math.cos(radians) * velocity,
+        Math.sin(radians) * velocity
+      );
+      
+      slipper.setAngularVelocity(360);
+      hasThrown = true;
+      launchTime = scene.time.now;
+      
+      // Clean up aiming UI
+      cancelAiming();
+      
+      // Change state
+      state = STATE.RETRIEVE;
+      updateTexts();
+    }
+    
+    function cancelAiming(){
+      isAiming = false;
+      launchPower = 0;
+      powerDirection = 1; // Reset to increasing
+      
+      if (powerBar) {
+        powerBar.destroy();
+        powerBar = null;
+      }
+      if (directionIndicator) {
+        directionIndicator.destroy();
+        directionIndicator = null;
+      }
+      
+      updateTexts();
     }
 
     // --- Helpers ---
@@ -338,13 +511,18 @@
         return;
       }
       if (state === STATE.AIM) {
-        statusText.setText('🎯 Step 1: Tumbahin ang lata (stay behind the line)');
-        infoText.setText('Drag to aim, release to throw.');
+        if (isAiming) {
+          statusText.setText('🎯 Aiming: Use arrows to aim, SPACE to launch, ESC to cancel');
+          infoText.setText('Power building up...');
+        } else {
+          statusText.setText('🎯 Step 1: Tumbahin ang lata (stay behind the line)');
+          infoText.setText('WASD/Arrows to move. SPACE to start aiming.');
+        }
         return;
       }
       if (state === STATE.RETRIEVE) {
         statusText.setText('🏃 Step 2: Kunin ang tsinelas. Babantayan ka pag lumampas sa linya.');
-        infoText.setText('WASD/Arrows or drag. Return behind the line to be safe.');
+        infoText.setText('WASD/Arrows to move. Return behind the line to be safe.');
         return;
       }
     }
