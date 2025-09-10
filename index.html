@@ -15,521 +15,596 @@
 <body>
   <div id="game"></div>
   <div class="hint">
-    Sprites enabled • <kbd>WASD</kbd> or <kbd>Arrows</kbd> to move player. <kbd>SPACE</kbd> to start aiming, <kbd>Arrows</kbd> to aim, <kbd>SPACE</kbd> to launch, <kbd>ESC</kbd> to cancel. <kbd>R</kbd> restart
+    Sprites enabled • <kbd>WASD</kbd> or <kbd>Arrows</kbd> to move player. <kbd>SPACE</kbd> to start aiming, watch the aim line move automatically, <kbd>SPACE</kbd> to launch at the right moment! <kbd>ESC</kbd> to cancel. <kbd>R</kbd> restart
   </div>
   <script>
-  (function(){
-    const config = {
-      type: Phaser.AUTO,
-      parent: 'game',
-      backgroundColor: '#0e0f12',
-      scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH, width: 960, height: 540 },
-      physics: { default: 'arcade', arcade: { gravity: { y: 0 }, debug: false } },
-      render: { pixelArt: true, roundPixels: true },
-      scene: { preload, create, update }
-    };
+(function () {
+  const config = {
+    type: Phaser.AUTO,
+    parent: 'game',
+    backgroundColor: '#0e0f12',
+    scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH, width: 960, height: 540 },
+    physics: { default: 'arcade', arcade: { gravity: { y: 0 }, debug: false } },
+    render: { pixelArt: true, roundPixels: true },
+    scene: { preload, create, update }
+  };
+  new Phaser.Game(config);
 
-    new Phaser.Game(config);
+  // --- Game State ---
+  const STATE = { AIM: 'aim', RETRIEVE: 'retrieve', WON: 'won', LOST: 'lost' };
+  let state = STATE.AIM;
 
-    // --- Game State ---
-    const STATE = { AIM:'aim', RETRIEVE:'retrieve', WON:'won', LOST:'lost' };
-    let state = STATE.AIM;
+  // Entities
+  let stump, can, player, slipper, bantay, perimeterY;
 
-    // Entities
-    let stump, can, player, slipper, bantay, perimeterY;
+  // UI
+  let statusText, infoText, aimLine;
+
+  // Input
+  let cursors, wasd;
+
+  // Flags
+  let hasThrown = false, playerCrossed = false, bantayChase = false;
+  let canOnStump = true, canDynamic = false, pickedUp = false;
+  let slipperHeld = true;
+  let launchTime = 0;
+
+  // Launch system
+  let isAiming = false;
+  let launchPower = 0;            // 0..100
+  let launchDirection = 90;       // 0=right, 90=up, 180=left (upper semicircle)
+  let powerBar, directionIndicator;
+  let powerDirection = 1;         // for ping-pong power bar
+  let powerSpeed = 80;
+  let aimDirection = 1;           // for automatic aim movement (1 = increasing, -1 = decreasing)
+  let aimSpeed = 60;              // speed of automatic aim movement
+
+  // Patrol
+  let patrolLeftX, patrolRightX, patrolDir = -1;
+
+  // Tunables
+  const powerCap = 3200;
+  const launchMul = 1.6;
+  const playerSpeed = 320;
+  const playerUpSpeed = 280;
+  const bantayPatrolSpeed = 60;
+  const bantayChaseSpeed = 100;  // Increased from 140 to 200 (faster chase)
+
+  // --- Preload ---
+  function preload() {
+    this.load.spritesheet('player', 'resources/player-sprites.png', {
+      frameWidth: 256,
+      frameHeight: 307,
+    });
+
+    this.load.spritesheet('bantay', 'resources/bantay-sprites.png', {
+      frameWidth: 219,
+      frameHeight: 270,
+    });
+
+    this.load.spritesheet('slipperSpin', 'resources/tsinelas-sprites.png', {
+      frameWidth: 384,
+      frameHeight: 627,
+    });
+
+    this.load.spritesheet('player-aim-sprite', 'resources/player-aim-sprites.png', {
+      frameWidth: 485,
+      frameHeight: 790,
+    });
+
+    // Player AIM single frame
+    this.load.image('playerAim', 'resources/player-aim.png');
+
+      // Can + generated stump
+    this.load.image('can', 'resources/lata.png');
+
+    const g = this.make.graphics({ add: false });
+    g.fillStyle(0x6b4f2a, 1); g.fillRoundedRect(0, 0, 64, 24, 6);
+    g.lineStyle(2, 0x533f23, 1); g.strokeRoundedRect(0, 0, 64, 24, 6);
+    g.generateTexture('stump', 64, 24);
+  }
+
+  function create() {
+    const { width, height } = this.scale.gameSize;
+
+    // --- Animations using spritesheets ---
+    // Player animations
+    this.anims.create({ key: 'player-idle', frames:
+      [
+        {
+          key: 'player',
+          frame: 0 
+        },
+        {
+          key: 'player',
+          frame: 1 
+        },
+
+      ]
+      , frameRate: 2, repeat: -1 });
+    this.anims.create({ key: 'player-run-north', frames:
+      [
+        {
+          key: 'player',
+          frame: 2 
+        },
+        {
+          key: 'player',
+          frame: 6 
+        },
+        {
+          key: 'player',
+          frame: 10 
+        },
+
+      ]
+      , frameRate: 4, repeat: -1 });
+     this.anims.create({ key: 'player-run-right', frames:
+      [
+        {
+          key: 'player',
+          frame: 3 
+        },
+        {
+          key: 'player',
+          frame: 7 
+        },
+        {
+          key: 'player',
+          frame: 11 
+        },
+
+      ]
+      , frameRate: 4, repeat: -1 });
+     this.anims.create({ key: 'player-celebrate', frames:
+      [
+        {
+          key: 'player',
+          frame: 12 
+        },
+        {
+          key: 'player',
+          frame: 13 
+        },
+      ]
+      , frameRate: 2, repeat: -1 });
+     this.anims.create({ key: 'player-sad', frames:
+      [
+        {
+          key: 'player',
+          frame: 14 
+        },
+        {
+          key: 'player',
+          frame: 15 
+        },
+      ]
+      , frameRate: 2, repeat: -1 });
+    // Bantay animations
+    this.anims.create({ key: 'bantay-idle', frames: this.anims.generateFrameNumbers('bantay', { start: 0, end: 3 }), frameRate: 4, repeat: -1 });
+    this.anims.create({ key: 'bantay-run-north', frames: this.anims.generateFrameNumbers('bantay', { start: 4, end: 7 }), frameRate: 8, repeat: -1 });
+    this.anims.create({ key: 'bantay-run-right', frames: this.anims.generateFrameNumbers('bantay', { start: 8, end: 11 }), frameRate: 8, repeat: -1 });
+    this.anims.create({ key: 'bantay-sad', frames: this.anims.generateFrameNumbers('bantay', { start: 12, end: 15 }), frameRate: 4, repeat: -1 });
+
+    // Slipper spin - use tsinelas spritesheet
+    this.anims.create({ key: 'slipper-spin', frames: this.anims.generateFrameNumbers('slipperSpin', { start: 0, end: 3 }), frameRate: 12, repeat: -1 });
+    this.anims.create({ key: 'player-aim', frames: this.anims.generateFrameNumbers('player-aim-sprite', { start: 0, end: 1 }), frameRate: 2, repeat: -1 });
+
+
+    perimeterY = height * 0.8;
+
+    // Stump + can (static first)
+    const stumpX = width * 0.5, stumpY = height * 0.17;
+    stump = this.physics.add.staticImage(stumpX, stumpY, 'stump');
+    can = this.physics.add.staticImage(stumpX, stumpY - 40, 'can').setScale(1.0);
+
+    // Bantay
+    patrolLeftX = stumpX - Math.min(220, width * 0.35);
+    patrolRightX = stumpX + Math.min(220, width * 0.35);
+    bantay = this.physics.add.sprite(stumpX, perimeterY - 65, 'bantay');
+    bantay.setImmovable(true).body.setAllowGravity(false);
+    bantay.setScale(0.5);
+    bantay.play('bantay-idle');
+
+    // Tight tagging distance
+    bantay.body.setSize(bantay.width * 0.6, bantay.height * 0.6);
+    bantay.body.setOffset((bantay.width - bantay.body.width) / 2, (bantay.height - bantay.body.height) / 2);
+
+    // Player
+    player = this.physics.add.sprite(width * 0.5, height - 90, 'player');
+    player.setCollideWorldBounds(true).body.setAllowGravity(false);
+    player.setScale(1.0);
+    player.play('player-idle');
+
+    // Slipper
+    slipper = this.physics.add.sprite(player.x + 10, player.y - 20, 'slipperSpin');
+    slipper.setBounce(0.4).setCollideWorldBounds(true).setDrag(160, 160);
+    slipper.body.setAllowGravity(false);
+    slipper.setScale(0.1);
+    slipper.setVisible(true);
+    slipper.body.enable = false;
+
+    // Overlaps / collisions
+    this.physics.add.overlap(slipper, can, onHitCan, null, this);
+    this.physics.add.overlap(player, slipper, tryPickup, null, this);
+    this.physics.add.overlap(player, bantay, maybeTag, null, this);
+    this.physics.add.collider(slipper, can, onSlipperCanCollision, null, this);
 
     // UI
-    let statusText, infoText, aimLine, startPoint;
+    statusText = this.add.text(16, 16, '', f18('#e7e9ee'));
+    infoText = this.add.text(16, 40, '', f14('#9aa3b2'));
+    aimLine = this.add.graphics();
+
+    // Perimeter line
+    const line = this.add.graphics();
+    line.lineStyle(2, 0x334155, 1).strokeLineShape(new Phaser.Geom.Line(0, perimeterY, width, perimeterY));
+    this.add.text(16, perimeterY - 18, '— perimeter —', f14('#64748b'));
 
     // Input
-    let cursors, wasd, pointerVec = new Phaser.Math.Vector2();
+    cursors = this.input.keyboard.createCursorKeys();
+    wasd = this.input.keyboard.addKeys({
+      up: Phaser.Input.Keyboard.KeyCodes.W,
+      down: Phaser.Input.Keyboard.KeyCodes.S,
+      left: Phaser.Input.Keyboard.KeyCodes.A,
+      right: Phaser.Input.Keyboard.KeyCodes.D
+    });
+    this.input.keyboard.on('keydown-R', () => this.scene.restart());
 
-    // Flags
-    let hasThrown = false, playerCrossed = false, bantayChase = false;
-    let canOnStump = true, canDynamic = false, pickedUp = false;
-    let slipperHeld = true; // Track if slipper is being held by player
-    let launchTime = 0; // Track when slipper was launched
-    
-    // Launch system
-    let isAiming = false; // True when in aiming mode
-    let launchPower = 0; // Current launch power (0-100)
-    let launchDirection = 0; // Launch direction in degrees (0 = up, 90 = right, etc.)
-    let powerBar, directionIndicator;
-    let powerDirection = 1; // 1 for increasing, -1 for decreasing
-    let powerSpeed = 80; // Speed of power bar movement
+    // Launch controls
+    this.input.keyboard.on('keydown-SPACE', () => {
+      if (state === STATE.AIM && slipperHeld && !isAiming) {
+        startAiming(this);
+      } else if (isAiming) {
+        launchSlipper(this);
+      }
+    });
+    this.input.keyboard.on('keydown-ESC', () => { if (isAiming) cancelAiming(); });
 
-    // Patrol
-    let patrolLeftX, patrolRightX, patrolDir = -1;
+    updateTexts();
+  }
 
-    // Tunables
-    const powerCap = 3200;          // max throw strength
-    const launchMul = 1.6;          // throw multiplier
-    const playerSpeed = 320;        // horizontal (increased from 260)
-    const playerUpSpeed = 280;      // vertical during RETRIEVE (increased from 220)
-    const bantayPatrolSpeed = 60;   // idle patrol (decreased from 90)
-    const bantayChaseSpeed = 140;   // chase speed (decreased from 180)
+  function update(_, delta) {
+    const dt = delta / 1000;
+    if (state === STATE.WON || state === STATE.LOST) return;
 
-    // --- Preload external PNGs ---
-    function preload(){
-      // Player 4 frames
-      this.load.image('player1', 'resources/player-f1.png');
-      this.load.image('player2', 'resources/player-f2.png');
-      this.load.image('player3', 'resources/player-f3.png');
-      this.load.image('player4', 'resources/player-f4.png');
+    // Bantay: patrol or chase
+    if (!bantayChase) {
+      bantay.x += patrolDir * bantayPatrolSpeed * dt;
+      if (bantay.x < patrolLeftX) { bantay.x = patrolLeftX; patrolDir = 1; }
+      if (bantay.x > patrolRightX) { bantay.x = patrolRightX; patrolDir = -1; }
+      bantay.flipX = patrolDir < 0; // face direction of travel
+      bantay.play('bantay-idle', true); 
+    } else {
+      const dirX = Math.sign(player.x - bantay.x);
+      bantay.x += dirX * bantayChaseSpeed * dt;
+      const dirY = Math.sign(player.y - bantay.y);
+      bantay.y += dirY * 120 * dt;
 
-      // Bantay 4 frames
-      this.load.image('bantay1', 'resources/bantay-1.png');
-      this.load.image('bantay2', 'resources/bantay-2.png');
-      this.load.image('bantay3', 'resources/bantay-3.png');
-      this.load.image('bantay4', 'resources/bantay-4.png');
-
-      // Slipper & can
-      this.load.image('slipper', 'resources/tsinelas.png');
-      this.load.image('can', 'resources/lata.png');
-
-      // Stump is generated (simple pixel block) — replace with sprite later if you want
-      const g = this.make.graphics({ add:false });
-      g.fillStyle(0x6b4f2a, 1); g.fillRoundedRect(0, 0, 64, 24, 6);
-      g.lineStyle(2, 0x533f23, 1); g.strokeRoundedRect(0, 0, 64, 24, 6);
-      g.generateTexture('stump', 64, 24);
-    }
-
-    function create(){
-      const { width, height } = this.scale.gameSize;
-
-      // Animations from multiple images
-      this.anims.create({
-        key: 'player-run', frameRate: 8, repeat: -1,
-        frames: [ {key:'player1'}, {key:'player2'}, {key:'player3'}, {key:'player4'} ]
-      });
-      this.anims.create({
-        key: 'bantay-run', frameRate: 8, repeat: -1,
-        frames: [ {key:'bantay1'}, {key:'bantay2'}, {key:'bantay3'}, {key:'bantay4'} ]
-      });
-
-      perimeterY = height * 0.6; // safety line
-
-      // Stump + can at top (can starts STATIC so it won't move until hit)
-      const stumpX = width * 0.5, stumpY = height * 0.18;
-      stump = this.physics.add.staticImage(stumpX, stumpY, 'stump');
-      can = this.physics.add.staticImage(stumpX, stumpY - 50, 'can');
-      can.setScale(1.11); // Scale sprite to 50% of original size (45% * 1.11 ≈ 50%)
-
-      // Bantay patrols above the line — no gravity in top-down
-      patrolLeftX = stumpX - Math.min(220, width*0.35);
-      patrolRightX = stumpX + Math.min(220, width*0.35);
-      bantay = this.physics.add.sprite(stumpX, perimeterY - 28, 'bantay1');
-      bantay.setImmovable(true);
-      bantay.body.setAllowGravity(false);
-      bantay.setScale(1.11); // Scale sprite to 50% of original size (45% * 1.11 ≈ 50%)
-      bantay.play('bantay-run');
-
-      // Player (top-down) — no gravity
-      player = this.physics.add.sprite(width*0.5, height - 64, 'player1');
-      player.setCollideWorldBounds(true);
-      player.body.setAllowGravity(false);
-      player.setScale(1.11); // Scale sprite to 50% of original size (45% * 1.11 ≈ 50%)
-
-      // Tsinelas (projectile) - starts with player
-      slipper = this.physics.add.image(player.x + 10, player.y - 20, 'slipper');
-      slipper.setBounce(0.4).setCollideWorldBounds(true).setDrag(160,160);
-      slipper.body.setAllowGravity(false);
-      slipper.setScale(1.11); // Scale sprite to 50% of original size (45% * 1.11 ≈ 50%)
-      slipper.setVisible(true); // Make sure it's visible
-      slipper.body.enable = false; // Disable physics initially (held by player)
-
-      // Overlaps / collisions
-      this.physics.add.overlap(slipper, can, onHitCan, null, this); // while can is static, overlap is enough
-      this.physics.add.overlap(player, slipper, tryPickup, null, this);
-      this.physics.add.overlap(player, bantay, maybeTag, null, this);
-      
-      // Add collision between slipper and can for realistic bouncing
-      this.physics.add.collider(slipper, can, onSlipperCanCollision, null, this);
-      
-      // Add slight padding to collision detection for better gameplay with scaled sprites
-      player.body.setSize(player.width * 1.1, player.height * 1.1);
-      bantay.body.setSize(bantay.width * 1.1, bantay.height * 1.1);
-
-      // UI
-      statusText = this.add.text(16, 16, '', f18('#e7e9ee'));
-      infoText = this.add.text(16, 40, '', f14('#9aa3b2'));
-      aimLine = this.add.graphics();
-
-      // Perimeter line
-      const line = this.add.graphics();
-      line.lineStyle(2, 0x334155, 1).strokeLineShape(new Phaser.Geom.Line(0, perimeterY, width, perimeterY));
-      this.add.text(16, perimeterY - 18, '— perimeter —', f14('#64748b'));
-
-      // Input (mouse system removed - using keyboard launch system)
-
-      cursors = this.input.keyboard.createCursorKeys();
-      wasd = this.input.keyboard.addKeys({
-        up: Phaser.Input.Keyboard.KeyCodes.W,
-        down: Phaser.Input.Keyboard.KeyCodes.S,
-        left: Phaser.Input.Keyboard.KeyCodes.A,
-        right: Phaser.Input.Keyboard.KeyCodes.D
-      });
-      this.input.keyboard.on('keydown-R', ()=> this.scene.restart());
-      
-      // Launch system controls
-      this.input.keyboard.on('keydown-SPACE', () => {
-        if (state === STATE.AIM && slipperHeld && !isAiming) {
-          startAiming(this);
-        } else if (isAiming) {
-          launchSlipper(this);
-        }
-      });
-      
-      this.input.keyboard.on('keydown-ESC', () => {
-        if (isAiming) {
-          cancelAiming();
-        }
-      });
-
-      updateTexts();
-    }
-
-    function update(_, delta){
-      const dt = delta/1000;
-      if (state === STATE.WON || state === STATE.LOST) return;
-
-      // Bantay: patrol or chase
-      if (!bantayChase) {
-        bantay.x += patrolDir * bantayPatrolSpeed * dt;
-        if (bantay.x < patrolLeftX) { bantay.x = patrolLeftX; patrolDir = 1; }
-        if (bantay.x > patrolRightX) { bantay.x = patrolRightX; patrolDir = -1; }
-        // Play running animation during patrol
-        bantay.anims.play('bantay-run', true);
+      // Choose anim based on stronger axis
+      if (Math.abs(player.x - bantay.x) >= Math.abs(player.y - bantay.y)) {
+        bantay.flipX = dirX < 0 ? true : false; // right anim; flip for left
+        bantay.play('bantay-run-right', true);
       } else {
-        const dirX = Math.sign(player.x - bantay.x);
-        bantay.x += dirX * bantayChaseSpeed * dt;
-        const dirY = Math.sign(player.y - bantay.y);
-        bantay.y += dirY * 120 * dt; // Reduced vertical chase speed for better balance
-        // Play running animation during chase
-        bantay.anims.play('bantay-run', true);
+        bantay.play('bantay-run-north', true);
+      }
+    }
+
+    // Player movement
+    let vx = 0, vy = 0;
+    if (!isAiming) {
+      if (cursors.left.isDown || wasd.left.isDown) vx -= 1;
+      if (cursors.right.isDown || wasd.right.isDown) vx += 1;
+      if (state === STATE.RETRIEVE) {
+        if (cursors.up.isDown || wasd.up.isDown) vy -= 1;
+        if (cursors.down.isDown || wasd.down.isDown) vy += 1;
+      }
+    } else {
+      // Automatic aiming: aim moves back and forth automatically
+      launchDirection += aimDirection * aimSpeed * dt;
+      
+      // Reverse direction when hitting limits
+      if (launchDirection >= 180) {
+        launchDirection = 180;
+        aimDirection = -1;
+      } else if (launchDirection <= 0) {
+        launchDirection = 0;
+        aimDirection = 1;
       }
 
-      // Player movement (keyboard only) - disabled when aiming
-      let vx = 0, vy = 0;
-      if (!isAiming) {
-        if (cursors.left.isDown || wasd.left.isDown) vx -= 1;
-        if (cursors.right.isDown || wasd.right.isDown) vx += 1;
-        if (state === STATE.RETRIEVE) {
-          if (cursors.up.isDown || wasd.up.isDown) vy -= 1;
-          if (cursors.down.isDown || wasd.down.isDown) vy += 1;
-        }
+      // Power meter ping-pong
+      launchPower += powerDirection * powerSpeed * dt;
+      if (launchPower >= 100) { launchPower = 100; powerDirection = -1; }
+      else if (launchPower <= 0) { launchPower = 0; powerDirection = 1; }
+      updatePowerBar();
+    }
+    player.setVelocityX(vx * playerSpeed);
+    player.setVelocityY(vy * playerUpSpeed);
+
+     // Choose player anim/pose
+     if (state === STATE.AIM) {
+       //player.anims.stop();
+       //player.setTexture('playerAim');
+       player.play('player-aim', true);
+       player.setDisplaySize(130, 140);
+       slipper.setVisible(false);
+       slipper.body.enable = false;
+    } else {
+      if (!pickedUp) {
+        slipper.setVisible(true);
+        slipper.body.enable = true;
+      }
+      player.setDisplaySize(140, 150);
+      if (vx === 0 && vy === 0) {
+        player.play('player-idle', true);
       } else {
-        // When aiming, arrow keys control direction (5-degree increments, 0-180 degrees for horizontal aiming)
-        if (cursors.left.isDown && launchDirection > 0) {
-          launchDirection = Math.max(0, launchDirection - 5);
-        }
-        if (cursors.right.isDown && launchDirection < 180) {
-          launchDirection = Math.min(180, launchDirection + 5);
-        }
-        
-        // Update power bar (bouncing)
-        launchPower += powerDirection * powerSpeed * dt;
-        if (launchPower >= 100) {
-          launchPower = 100;
-          powerDirection = -1; // Start decreasing
-        } else if (launchPower <= 0) {
-          launchPower = 0;
-          powerDirection = 1; // Start increasing
-        }
-        updatePowerBar();
-      }
-      player.setVelocityX(vx * playerSpeed);
-      player.setVelocityY(vy * playerUpSpeed);
-
-      // Play/stop run anim based on movement
-      if (vx !== 0 || vy !== 0) player.anims.play('player-run', true); 
-      else { player.anims.stop(); player.setTexture('player1'); }
-
-      // Make tsinelas follow player when held (before thrown)
-      if (slipperHeld && !hasThrown && state === STATE.AIM) {
-        slipper.x = player.x + 10;
-        slipper.y = player.y - 20;
-      }
-
-      // Keep player behind line in AIM state
-      if (state === STATE.AIM && player.y < perimeterY + 8) player.y = perimeterY + 8;
-
-      // After throw, crossing triggers chase (visual pressure)
-      if (state === STATE.RETRIEVE && hasThrown) {
-        playerCrossed = player.y < perimeterY - 6;
-        if (playerCrossed) bantayChase = true;
-        // Ensure aim line is cleared when in retrieve state
-        aimLine.clear();
-      }
-
-      // Auto-win when picked up & safely behind line while being chased
-      if (state === STATE.RETRIEVE && pickedUp && bantayChase && player.y >= perimeterY + 8) {
-        state = STATE.WON; updateTexts();
-      }
-
-      // Bantay animation is now handled in the movement section above
-
-      // Stop spinning when objects slow down
-      if (slipper.body && slipper.body.velocity.length() < 50) {
-        slipper.setAngularVelocity(0);
-      }
-      if (canDynamic && can.body && can.body.velocity.length() < 30) {
-        can.setAngularVelocity(0);
-      }
-    }
-
-    // --- Mechanics ---
-    function onHitCan(){
-      // First impact should DISPLACE the can. If it's still static and we're in AIM, swap to dynamic and push it
-      if (!canDynamic && state === STATE.AIM) {
-        const scene = this;
-        const pos = { x: can.x, y: can.y };
-        const sv = slipper.body
-          ? new Phaser.Math.Vector2(slipper.body.velocity.x, slipper.body.velocity.y)
-          : new Phaser.Math.Vector2(0,0);
-        can.destroy();
-        can = scene.physics.add.image(pos.x, pos.y, 'can')
-          .setBounce(0.3) // Add some bounce for more realistic physics
-          .setCollideWorldBounds(true)
-          .setDrag(120,120); // Reduced drag for more dynamic movement
-        can.body.setAllowGravity(false);
-        can.setScale(1.11); // Scale sprite to 50% of original size (45% * 1.11 ≈ 50%)
-        can.setAngularVelocity(180); // Add spinning when hit
-        can.setVelocity(sv.x * 0.8, sv.y * 0.8); // Transfer some momentum from slipper
-        canDynamic = true;
-        canOnStump = false;
-        // State already changed to RETRIEVE in launch function
-      }
-    }
-
-    function tryPickup(){
-      if (state !== STATE.RETRIEVE || pickedUp) return;
-      
-      // Prevent immediate pickup after launch (wait at least 500ms)
-      if (this.time.now - launchTime < 500) return;
-      
-      // Also check distance - slipper must be at least 50 pixels away from player
-      const distance = Phaser.Math.Distance.Between(player.x, player.y, slipper.x, slipper.y);
-      if (distance < 50) return;
-      
-      pickedUp = true;
-      slipper.setVisible(false);
-      slipper.body.enable = false;
-      slipper.setAngularVelocity(0); // Stop spinning when picked up
-      slipperHeld = true; // Slipper is held again
-      if (!bantayChase) {
-        state = STATE.WON; updateTexts(); return;
-      }
-      if (player.y >= perimeterY + 8) { state = STATE.WON; updateTexts(); }
-    }
-
-    function maybeTag(){
-      // Bantay can tag the player when chasing during retrieve phase
-      if (bantayChase && state === STATE.RETRIEVE) {
-        state = STATE.LOST; updateTexts();
-      }
-    }
-
-    function onSlipperCanCollision(slipper, can){
-      // Realistic collision between slipper and can
-      if (canDynamic) {
-        // Calculate collision angle and apply realistic bounce
-        const dx = slipper.x - can.x;
-        const dy = slipper.y - can.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        
-        if (distance > 0) {
-          // Normalize direction vector
-          const nx = dx / distance;
-          const ny = dy / distance;
-          
-          // Apply bounce in the direction away from the can
-          const bounceForce = 200;
-          slipper.setVelocity(nx * bounceForce, ny * bounceForce);
+        if (Math.abs(vx) >= Math.abs(vy)) {
+          // Horizontal: use run-right and flip for left
+          player.flipX = vx > 0;
+          player.play('player-run-right', true);
+        } else {
+          // Vertical: going up -> run-north, going down -> idle (front not provided)
+          if (vy < 0) player.play('player-run-north', true);
+          else player.play('player-idle', true);
         }
       }
     }
 
-    function launch(start, end){
-      // Enable slipper physics when launching
-      slipper.body.enable = true;
-      slipperHeld = false; // Slipper is no longer held
-      slipper.setVisible(true); // Make sure slipper is visible when thrown
-      
-      // Launch from player's current position
+    // Keep player behind line in AIM
+    if (state === STATE.AIM && player.y < perimeterY + 8) player.y = perimeterY + 8;
+
+    // Slipper follows hand (visual) while aiming & held
+    if (slipperHeld && !hasThrown && state === STATE.AIM) {
       slipper.x = player.x + 10;
       slipper.y = player.y - 20;
-      
-      const v = new Phaser.Math.Vector2(start.x - end.x, start.y - end.y).limit(powerCap);
-      slipper.setVelocity(v.x * launchMul, -v.y * launchMul); // invert Y so up-drag = up throw
-      slipper.setAngularVelocity(360); // Add spinning animation to tsinelas
-      hasThrown = true;
-      launchTime = this.time.now; // Record launch time
-      
-      // Clear the aim trajectory line
+    }
+
+    // After throw, crossing triggers chase
+    if (state === STATE.RETRIEVE && hasThrown) {
+      playerCrossed = player.y < perimeterY - 6;
+      if (playerCrossed) bantayChase = true;
+      // clear aim line if any
       aimLine.clear();
-      
-      // Allow player to retrieve slipper regardless of can hit
-      state = STATE.RETRIEVE;
-      updateTexts();
     }
 
-    // --- Launch System Functions ---
-    function startAiming(scene){
-      isAiming = true;
-      launchPower = 0;
-      launchDirection = 0; // Default to right (0 degrees = 3 o'clock)
-      powerDirection = 1; // Start increasing
-      
-      // Create power bar
-      powerBar = scene.add.graphics();
-      directionIndicator = scene.add.graphics();
-      
-      updatePowerBar();
-      updateTexts();
-    }
-    
-    function updatePowerBar(){
-      if (!powerBar) return;
-      
-      const barWidth = 200;
-      const barHeight = 20;
-      const barX = 16;
-      const barY = 80;
-      
-      // Clear previous bar
-      powerBar.clear();
-      
-      // Background
-      powerBar.fillStyle(0x333333, 0.8);
-      powerBar.fillRect(barX, barY, barWidth, barHeight);
-      
-      // Power fill
-      const powerWidth = (launchPower / 100) * barWidth;
-      powerBar.fillStyle(0x00ff00, 0.8);
-      powerBar.fillRect(barX, barY, powerWidth, barHeight);
-      
-      // Border
-      powerBar.lineStyle(2, 0xffffff, 1);
-      powerBar.strokeRect(barX, barY, barWidth, barHeight);
-      
-      // Update direction indicator
-      updateDirectionIndicator();
-    }
-    
-    function updateDirectionIndicator(){
-      if (!directionIndicator) return;
-      
-      directionIndicator.clear();
-      
-      // Draw arrow from slipper position
-      const arrowLength = 50;
-      // Convert angle: 0° = right (3 o'clock), 90° = up (12 o'clock), 180° = left (9 o'clock)
-      // Map 0-180 to 0-270-180 in Phaser coordinates
-      const phaserAngle = launchDirection <= 90 ? launchDirection * 3 : 270 - (launchDirection - 90);
-      const radians = Phaser.Math.DegToRad(phaserAngle);
-      const endX = slipper.x + Math.cos(radians) * arrowLength;
-      const endY = slipper.y + Math.sin(radians) * arrowLength;
-      
-      directionIndicator.lineStyle(4, 0xff0000, 1);
-      directionIndicator.strokeLineShape(new Phaser.Geom.Line(slipper.x, slipper.y, endX, endY));
-      
-      // Arrow head
-      directionIndicator.fillStyle(0xff0000, 1);
-      directionIndicator.fillCircle(endX, endY, 6);
-    }
-    
-    function launchSlipper(scene){
-      if (!isAiming) return;
-      
-      // Enable slipper physics when launching
-      slipper.body.enable = true;
-      slipperHeld = false;
-      slipper.setVisible(true);
-      
-      // Calculate velocity from power and direction
-      // Convert angle: 0° = right (3 o'clock), 90° = up (12 o'clock), 180° = left (9 o'clock)
-      // Map 0-180 to 0-270-180 in Phaser coordinates
-      const phaserAngle = launchDirection <= 90 ? launchDirection * 3 : 270 - (launchDirection - 90);
-      const radians = Phaser.Math.DegToRad(phaserAngle);
-      const velocity = (launchPower / 100) * 800; // Increased max velocity to 800
-      
-      slipper.setVelocity(
-        Math.cos(radians) * velocity,
-        Math.sin(radians) * velocity
-      );
-      
-      slipper.setAngularVelocity(360);
-      hasThrown = true;
-      launchTime = scene.time.now;
-      
-      // Clean up aiming UI
-      cancelAiming();
-      
-      // Change state
-      state = STATE.RETRIEVE;
-      updateTexts();
-    }
-    
-    function cancelAiming(){
-      isAiming = false;
-      launchPower = 0;
-      powerDirection = 1; // Reset to increasing
-      
-      if (powerBar) {
-        powerBar.destroy();
-        powerBar = null;
-      }
-      if (directionIndicator) {
-        directionIndicator.destroy();
-        directionIndicator = null;
-      }
-      
-      updateTexts();
+    // Win when picked up & safe
+    if (state === STATE.RETRIEVE && pickedUp && bantayChase && player.y >= perimeterY + 8) {
+      player.play('player-celebrate',true);
+      bantay.play('bantay-sad', true);
+      state = STATE.WON; updateTexts();
     }
 
-    // --- Helpers ---
-    function drawAim(scene, start, cur){
-      const dir = new Phaser.Math.Vector2(start.x - cur.x, start.y - cur.y);
-      const len = Math.min(dir.length(), 360); dir.setLength(len);
-      const end = new Phaser.Math.Vector2(slipper.x, slipper.y).add(dir);
-      aimLine.clear();
-      aimLine.lineStyle(3, 0x9ad1ff, 1);
-      aimLine.strokeLineShape(new Phaser.Geom.Line(slipper.x, slipper.y, end.x, end.y));
-      aimLine.fillStyle(0x9ad1ff, 1); aimLine.fillCircle(end.x, end.y, 4);
+    // Slow-down stops spins/rotation
+    if (slipper.body && slipper.body.velocity.length() < 50) {
+      slipper.setAngularVelocity(0);
+      slipper.anims.stop();
+      slipper.setFrame(0);
     }
+    if (canDynamic && can.body && can.body.velocity.length() < 30) {
+      can.setAngularVelocity(0);
+    }
+  }
 
-    function updateTexts(){
-      if (state === STATE.WON) {
-        statusText.setText('✅ Panalo! Nakuha mo ang tsinelas at nakabalik sa ligtas.');
-        infoText.setText('Press R to play again');
-        return;
-      }
-      if (state === STATE.LOST) {
-        statusText.setText('🛑 Tagged!');
-        infoText.setText('Press R to retry');
-        return;
-      }
-      if (state === STATE.AIM) {
-        if (isAiming) {
-          statusText.setText('🎯 Aiming: Use arrows to aim, SPACE to launch, ESC to cancel');
-          infoText.setText('Power building up...');
-        } else {
-          statusText.setText('🎯 Step 1: Tumbahin ang lata (stay behind the line)');
-          infoText.setText('WASD/Arrows to move. SPACE to start aiming.');
-        }
-        return;
-      }
-      if (state === STATE.RETRIEVE) {
-        statusText.setText('🏃 Step 2: Kunin ang tsinelas. Babantayan ka pag lumampas sa linya.');
-        infoText.setText('WASD/Arrows to move. Return behind the line to be safe.');
-        return;
+  // --- Mechanics ---
+  function onHitCan(slipperObj, canObj) {
+    if (canDynamic) return;
+
+    const scene = this;
+    const sv = slipperObj.body ? slipperObj.body.velocity.clone() : new Phaser.Math.Vector2();
+    const canScale = canObj.scaleX;
+    const pos = canObj.getCenter();
+    canObj.destroy();
+
+     can = scene.physics.add.image(pos.x, pos.y, 'can')
+      .setScale(canScale)
+      .setBounce(0.2)
+      .setCollideWorldBounds(true)
+      .setDrag(120, 120);
+    can.body.setAllowGravity(false);
+
+    scene.cameras.main.shake(80, 0.002);
+
+    can.setVelocity(sv.x, sv.y);
+    scene.physics.add.collider(slipper, can);
+
+    canDynamic = true;
+    canOnStump = false;
+    updateTexts();
+  }
+
+  function tryPickup() {
+    if (state !== STATE.RETRIEVE || pickedUp) return;
+
+    // small cooldown after throw
+    const timeSinceLaunch = this.time.now - launchTime;
+    console.log('time since launch:', timeSinceLaunch);
+    if (timeSinceLaunch < 500) return;
+
+    const distance = Phaser.Math.Distance.Between(player.x, player.y, slipper.x, slipper.y);
+   
+    if (distance > 50) return;
+
+    console.log('pickup dist', distance);
+    console.log('About to pickup slipper...');
+
+    pickedUp = true;
+    console.log('pickedUp set to true');
+    
+    slipper.setVisible(false);
+    console.log('slipper set to invisible');
+    
+    slipper.body.enable = false;
+    slipper.setAngularVelocity(0);
+    slipper.anims.stop();
+    slipper.setFrame(0);
+    slipperHeld = true;
+    console.log('slipper pickup complete');
+
+    if (!bantayChase) { state = STATE.WON; player.play('player-celebrate',true); bantay.play('bantay-sad', true); updateTexts(); return; }
+    if (player.y >= perimeterY + 8) { state = STATE.WON; player.play('player-celebrate',true); bantay.play('bantay-sad', true); updateTexts(); }
+  }
+
+  function maybeTag() {
+    if (bantayChase && state === STATE.RETRIEVE) {
+      player.play('player-sad', true);
+      state = STATE.LOST; updateTexts();
+    }
+  }
+
+  function onSlipperCanCollision(slipper, can) {
+    if (canDynamic) {
+      const dx = slipper.x - can.x;
+      const dy = slipper.y - can.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance > 0) {
+        const nx = dx / distance, ny = dy / distance;
+        const bounceForce = 200;
+        slipper.setVelocity(nx * bounceForce, ny * bounceForce);
       }
     }
+  }
 
-    function f18(color){ return { fontFamily:'system-ui, sans-serif', fontSize:'18px', color: color }; }
-    function f14(color){ return { fontFamily:'system-ui, sans-serif', fontSize:'14px', color: color }; }
-  })();
-  </script>
+  function launch(start, end) {
+    slipper.setVisible(true);
+    slipper.body.enable = true;
+    slipperHeld = false;
+
+    slipper.x = player.x + 10;
+    slipper.y = player.y - 20;
+
+    const v = new Phaser.Math.Vector2(start.x - end.x, start.y - end.y).limit(powerCap);
+    slipper.setVelocity(v.x * launchMul, -v.y * launchMul);
+    slipper.setAngularVelocity(360);
+    slipper.play('slipper-spin');
+
+    hasThrown = true;
+    launchTime = this.time.now;
+    aimLine.clear();
+
+    state = STATE.RETRIEVE;
+    updateTexts();
+  }
+
+  // --- Launch System (keyboard power/direction) ---
+  function startAiming(scene) {
+    isAiming = true;
+    launchPower = 0;
+    launchDirection = 90;
+    powerDirection = 1;
+
+    powerBar = scene.add.graphics();
+    directionIndicator = scene.add.graphics();
+    updatePowerBar();
+    updateTexts();
+  }
+
+  function updatePowerBar() {
+    if (!powerBar) return;
+    const barWidth = 200, barHeight = 20, barX = 16, barY = 80;
+
+    powerBar.clear();
+    powerBar.fillStyle(0x333333, 0.8);
+    powerBar.fillRect(barX, barY, barWidth, barHeight);
+
+    const powerWidth = (launchPower / 100) * barWidth;
+    powerBar.fillStyle(0x00ff00, 0.8);
+    powerBar.fillRect(barX, barY, powerWidth, barHeight);
+
+    powerBar.lineStyle(2, 0xffffff, 1);
+    powerBar.strokeRect(barX, barY, barWidth, barHeight);
+
+    updateDirectionIndicator();
+  }
+
+  function updateDirectionIndicator() {
+    if (!directionIndicator) return;
+
+    directionIndicator.clear();
+    const arrowLength = 50;
+    const radians = Phaser.Math.DegToRad(launchDirection);
+    const endX = slipper.x + Math.cos(radians) * arrowLength;
+    const endY = slipper.y - Math.sin(radians) * arrowLength;
+
+    directionIndicator.lineStyle(4, 0xff0000, 1);
+    directionIndicator.strokeLineShape(new Phaser.Geom.Line(slipper.x, slipper.y, endX, endY));
+    directionIndicator.fillStyle(0xff0000, 1);
+    directionIndicator.fillCircle(endX, endY, 6);
+  }
+
+   function launchSlipper(scene) {
+     if (!isAiming) return;
+
+     slipper.body.enable = true;
+     slipper.setVisible(true);
+     slipperHeld = false;
+
+    slipper.x = player.x + 10;
+    slipper.y = player.y - 20;
+
+    const radians = Phaser.Math.DegToRad(launchDirection);
+    const velocity = (launchPower / 100) * 800;
+
+    slipper.setVelocity(Math.cos(radians) * velocity, -Math.sin(radians) * velocity);
+    slipper.setAngularVelocity(360);
+    slipper.play('slipper-spin');
+
+    hasThrown = true;
+    launchTime = scene.time.now;
+
+    cancelAiming();
+    state = STATE.RETRIEVE;
+    updateTexts();
+  }
+
+  function cancelAiming() {
+    isAiming = false;
+    launchPower = 0;
+    powerDirection = 1;
+
+    if (powerBar) { powerBar.destroy(); powerBar = null; }
+    if (directionIndicator) { directionIndicator.destroy(); directionIndicator = null; }
+
+    updateTexts();
+  }
+
+  // --- Helpers (for the old drag-aim line, kept if you re-enable mouse throws) ---
+  function drawAim(scene, start, cur) {
+    const dir = new Phaser.Math.Vector2(start.x - cur.x, start.y - cur.y);
+    const len = Math.min(dir.length(), 360); dir.setLength(len);
+    const end = new Phaser.Math.Vector2(slipper.x, slipper.y).add(dir);
+    aimLine.clear();
+    aimLine.lineStyle(3, 0x9ad1ff, 1);
+    aimLine.strokeLineShape(new Phaser.Geom.Line(slipper.x, slipper.y, end.x, end.y));
+    aimLine.fillStyle(0x9ad1ff, 1); aimLine.fillCircle(end.x, end.y, 4);
+  }
+
+  function updateTexts() {
+    if (state === STATE.WON) {
+      statusText.setText('✅ Panalo! Nakuha mo ang tsinelas at nakabalik sa ligtas.');
+      infoText.setText('Press R to play again'); return;
+    }
+    if (state === STATE.LOST) {
+      statusText.setText('🛑 Tagged!');
+      infoText.setText('Press R to retry'); return;
+    }
+    if (state === STATE.AIM) {
+      if (isAiming) {
+        statusText.setText('🎯 Aiming: Watch the aim line! Press SPACE at the right moment!');
+        infoText.setText('Power building up... Aim moves automatically!'); return;
+      } else {
+        statusText.setText('🎯 Step 1: Tumbahin ang lata (stay behind the line)');
+        infoText.setText('WASD/Arrows to move. SPACE to start aiming.'); return;
+      }
+    }
+    if (state === STATE.RETRIEVE) {
+      statusText.setText('🏃 Step 2: Kunin ang tsinelas. Babantayan ka pag lumampas sa linya.');
+      infoText.setText('WASD/Arrows to move. Return behind the line to be safe.'); return;
+    }
+  }
+
+  function f18(color) { return { fontFamily: 'system-ui, sans-serif', fontSize: '18px', color: color }; }
+  function f14(color) { return { fontFamily: 'system-ui, sans-serif', fontSize: '14px', color: color }; }
+})();
+</script>
+
 </body>
 </html>
